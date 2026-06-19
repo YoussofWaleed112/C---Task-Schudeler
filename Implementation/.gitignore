@@ -1,0 +1,11 @@
+# Visual Studio Cache and Build outputs
+.vs/
+out/
+build/
+*.db
+*.db-shm
+*.db-wal
+*.opendb
+*.ipch
+*.suo
+*.user
