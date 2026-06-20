@@ -8,6 +8,19 @@
 
 namespace job_scheduler {
 
+// Helper: status enum to string
+static std::string status_to_string(JobStatus s) {
+    switch (s) {
+        case JobStatus::Active:    return "active";
+        case JobStatus::Paused:    return "paused";
+        case JobStatus::Running:   return "running";
+        case JobStatus::Completed: return "completed";
+        case JobStatus::Failed:    return "failed";
+        case JobStatus::Cancelled: return "cancelled";
+        default:                   return "active";
+    }
+}
+
 JobService::JobService(IJobReader& reader,
                        IJobWriter& writer,
                        Scheduler&  scheduler,
@@ -15,10 +28,7 @@ JobService::JobService(IJobReader& reader,
     : reader_(reader), writer_(writer),
       scheduler_(scheduler), executor_(executor) {}
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
 std::string JobService::generate_id() {
-    // Simple UUID-like hex string using random_device + timestamp
     static std::mt19937_64 rng(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uint64_t a = rng();
@@ -30,20 +40,8 @@ std::string JobService::generate_id() {
     return oss.str();
 }
 
-// ── CRUD operations ────────────────────────────────────────────────────────
-
 ServiceResult JobService::create_job(const CreateJobRequest& req) {
     ServiceResult result;
-
-    // Validate and build the schedule
-    std::shared_ptr<ISchedule> schedule;
-    try {
-        schedule = ScheduleParser::parse(req.schedule_type, req.schedule_expr);
-    } catch (const std::exception& e) {
-        result.ok    = false;
-        result.error = e.what();
-        return result;
-    }
 
     if (req.name.empty()) {
         result.ok    = false;
@@ -56,9 +54,17 @@ ServiceResult JobService::create_job(const CreateJobRequest& req) {
         return result;
     }
 
-    // Calculate initial next_run_time
+    std::shared_ptr<ISchedule> schedule;
+    try {
+        schedule = ScheduleParser::parse(req.schedule_type, req.schedule_expr);
+    } catch (const std::exception& e) {
+        result.ok    = false;
+        result.error = e.what();
+        return result;
+    }
+
     auto now  = std::chrono::system_clock::now();
-    auto next = schedule->next_run(now);
+    auto next = schedule->nextRunAfter(now);
     if (!next.has_value()) {
         result.ok    = false;
         result.error = "Schedule produces no valid run time";
@@ -71,14 +77,14 @@ ServiceResult JobService::create_job(const CreateJobRequest& req) {
     job.status           = JobStatus::Active;
     job.schedule_type    = req.schedule_type;
     job.schedule_expr    = req.schedule_expr;
-    job.execution_target = req.execution_target;
-    job.retry_policy.max_retries = req.max_retries;
-    job.retry_policy.retry_delay = std::chrono::seconds(req.retry_delay_seconds);
-    job.retry_count      = 0;
-    job.next_run_time    = *next;
+    job.executionTarget  = req.execution_target;
+    job.retryPolicy.maxRetries     = req.max_retries;
+    job.retryPolicy.backoffSeconds = req.retry_delay_seconds;
+    job.retryCount       = 0;
+    job.nextRunTime      = *next;
     job.schedule         = schedule;
 
-    writer_.save(job);
+    writer_.create(job);
     scheduler_.schedule(job);
 
     result.job = job;
@@ -86,12 +92,12 @@ ServiceResult JobService::create_job(const CreateJobRequest& req) {
 }
 
 std::vector<Job> JobService::list_jobs() {
-    return reader_.find_all();
+    return reader_.listAll();
 }
 
 ServiceResult JobService::get_job(const std::string& id) {
     ServiceResult result;
-    auto job = reader_.find_by_id(id);
+    auto job = reader_.getById(id);
     if (!job) {
         result.ok    = false;
         result.error = "Job not found: " + id;
@@ -103,7 +109,7 @@ ServiceResult JobService::get_job(const std::string& id) {
 
 ServiceResult JobService::pause_job(const std::string& id) {
     ServiceResult result;
-    auto job = reader_.find_by_id(id);
+    auto job = reader_.getById(id);
     if (!job) {
         result.ok    = false;
         result.error = "Job not found: " + id;
@@ -118,21 +124,21 @@ ServiceResult JobService::pause_job(const std::string& id) {
         job->status == JobStatus::Failed    ||
         job->status == JobStatus::Cancelled) {
         result.ok    = false;
-        result.error = "Cannot pause a job in status: " + to_string(job->status);
+        result.error = "Cannot pause a job in status: " + status_to_string(job->status);
         return result;
     }
 
-    writer_.update_status(id, JobStatus::Paused);
+    job->status = JobStatus::Paused;
+    writer_.update(*job);
     scheduler_.pause(id);
 
-    job->status = JobStatus::Paused;
     result.job = *job;
     return result;
 }
 
 ServiceResult JobService::resume_job(const std::string& id) {
     ServiceResult result;
-    auto job = reader_.find_by_id(id);
+    auto job = reader_.getById(id);
     if (!job) {
         result.ok    = false;
         result.error = "Job not found: " + id;
@@ -140,12 +146,12 @@ ServiceResult JobService::resume_job(const std::string& id) {
     }
     if (job->status != JobStatus::Paused) {
         result.ok    = false;
-        result.error = "Job is not paused to resume ,the current status is: " + to_string(job->status);
+        result.error = "Job is not paused; current status: " + status_to_string(job->status);
         return result;
     }
 
-    writer_.update_status(id, JobStatus::Active);
     job->status = JobStatus::Active;
+    writer_.update(*job);
     scheduler_.resume(*job);
 
     result.job = *job;
@@ -154,7 +160,7 @@ ServiceResult JobService::resume_job(const std::string& id) {
 
 ServiceResult JobService::delete_job(const std::string& id) {
     ServiceResult result;
-    auto job = reader_.find_by_id(id);
+    auto job = reader_.getById(id);
     if (!job) {
         result.ok    = false;
         result.error = "Job not found: " + id;
