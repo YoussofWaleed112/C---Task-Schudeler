@@ -1,9 +1,6 @@
 #include "job_scheduler/executor/Executor.hpp"
-#include "job_scheduler/models/OneTimeSchedule.hpp"
-#include "job_scheduler/models/IntervalSchedule.hpp"
-#include "job_scheduler/models/CronSchedule.hpp"
+#include "job_scheduler/scheduler/Scheduler.hpp"
 #include <iostream>
-#include <thread>
 
 namespace job_scheduler {
 
@@ -11,14 +8,16 @@ Executor::Executor(ThreadPool& pool,
                    IJobRunner& runner,
                    IJobWriter& writer,
                    IJobReader& reader,
-                   Scheduler& scheduler)
-    : pool_(pool), runner_(runner), writer_(writer), reader_(reader), scheduler_(scheduler) {}
-
+                   Scheduler&  scheduler)
+    : pool_(pool), runner_(runner), writer_(writer),
+      reader_(reader), scheduler_(scheduler) {}
 
 void Executor::dispatch(Job job) {
-    // Mark running in DB immediately (before handing to pool)
-    writer_.update_status(job.id, JobStatus::Running);
     job.status = JobStatus::Running;
+    // Update DB status before handing to pool
+    Job updated = job;
+    updated.status = JobStatus::Running;
+    writer_.update(updated);
 
     pool_.submit([this, j = std::move(job)]() mutable {
         execute(std::move(j));
@@ -26,79 +25,70 @@ void Executor::dispatch(Job job) {
 }
 
 void Executor::execute(Job job) {
-    // Re-read from DB in case status changed while waiting in queue
-    auto job = reader_.find_by_id(job.id);
-    if (!job || job->status == JobStatus::Cancelled ||
-                  job->status == JobStatus::Paused) {
-        // Restore active status so it can be resumed later
-        if (job && job->status == JobStatus::Paused) {
-            writer_.update_status(job.id, JobStatus::Paused);
-        }
+    // Re-read from DB to get latest status (may have been paused/cancelled)
+    auto maybe_job = reader_.getById(job.id);
+    if (!maybe_job) return; // deleted
+
+    if (maybe_job->status == JobStatus::Cancelled ||
+        maybe_job->status == JobStatus::Paused) {
+        // If it was paused while queued, reset to paused so it won't re-run
+        Job tmp = *maybe_job;
+        writer_.update(tmp);
         return;
     }
-    job = *job;
 
-    // Build the schedule object from persisted type + expr
+    // Rebuild schedule from persisted type + expr
     std::shared_ptr<ISchedule> schedule;
     try {
         schedule = ScheduleParser::parse(job.schedule_type, job.schedule_expr);
     } catch (const std::exception& e) {
-        std::cerr << "[from executor] Failed to rebuild schedule for job "
+        std::cerr << "[executor] Failed to rebuild schedule for job "
                   << job.id << ": " << e.what() << "\n";
-        writer_.update_status(job.id, JobStatus::Failed);
+        job.status = JobStatus::Failed;
+        writer_.update(job);
         return;
     }
 
     bool success = runner_.run(job);
 
     if (success) {
-        // Calculate the next run time
-        auto now = std::chrono::system_clock::now();
-        auto next = schedule->next_run(now);
+        auto now  = std::chrono::system_clock::now();
+        auto next = schedule->nextRunAfter(now);
 
         if (!next.has_value() || job.schedule_type == "one_time") {
-            // One-time job or schedule exhausted → mark completed
-            writer_.update_status(job.id, JobStatus::Completed);
-            std::cout << "[from executor] Job '" << job.name << "' completed.\n";
+            job.status = JobStatus::Completed;
+            writer_.update(job);
+            std::cout << "[executor] Job '" << job.name << "' completed.\n";
         } else {
-            // Recurring job → reschedule
-            writer_.update_status(job.id, JobStatus::Active);
-            writer_.update_next_run(job.id, *next);
-            writer_.update_retry_count(job.id, 0); // reset retries on success
-
-            job.status = JobStatus::Active;
-            job.next_run_time = *next;
-            job.retry_count = 0;
-            job.schedule = schedule;
-
-            std::cout << "Job '" << job.name << "' succeeded, rescheduled.\n";
+            job.status       = JobStatus::Active;
+            job.nextRunTime  = *next;
+            job.retryCount   = 0;
+            job.schedule     = schedule;
+            writer_.update(job);
+            std::cout << "[executor] Job '" << job.name << "' succeeded, rescheduled.\n";
             scheduler_.reschedule(job);
         }
     } else {
-        // Failure path
-        int new_count = job.retry_count + 1;
+        int new_count = job.retryCount + 1;
 
-        if (new_count <= job.retry_policy.max_retries) {
-            // Schedule a retry
-            writer_.update_retry_count(job.id, new_count);
+        if (new_count <= job.retryPolicy.maxRetries) {
             auto retry_at = std::chrono::system_clock::now() +
-                            job.retry_policy.retry_delay;
-            writer_.update_next_run(job.id, retry_at);
-            writer_.update_status(job.id, JobStatus::Active);
+                            std::chrono::seconds(job.retryPolicy.backoffSeconds);
+            job.retryCount  = new_count;
+            job.nextRunTime = retry_at;
+            job.status      = JobStatus::Active;
+            job.schedule    = schedule;
+            writer_.update(job);
 
-            job.retry_count = new_count;
-            job.next_run_time = retry_at;
-            job.status = JobStatus::Active;
-            job.schedule = schedule;
-
-            std::cout << "[from executor] Job '" << job.name
+            std::cout << "[executor] Job '" << job.name
                       << "' failed (attempt " << new_count
-                      << "/" << job.retry_policy.max_retries
+                      << "/" << job.retryPolicy.maxRetries
                       << "), will retry.\n";
             scheduler_.reschedule(job);
         } else {
-            writer_.update_status(job.id, JobStatus::Failed);
-            std::cout << "[from executor] Job '" << job.name
+            job.status = JobStatus::Failed;
+            writer_.update(job);
+            std::cout << "[executor] Job '" << job.name
                       << "' failed – retries exhausted.\n";
         }
     }
