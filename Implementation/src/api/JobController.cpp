@@ -7,26 +7,36 @@ namespace job_scheduler {
 
 using namespace json_util;
 
-JobController::JobController(JobService& service) : service_(service) {}
+// Helper: status enum → string
+static std::string status_str(JobStatus s) {
+    switch (s) {
+        case JobStatus::Active:    return "active";
+        case JobStatus::Paused:    return "paused";
+        case JobStatus::Running:   return "running";
+        case JobStatus::Completed: return "completed";
+        case JobStatus::Failed:    return "failed";
+        case JobStatus::Cancelled: return "cancelled";
+        default:                   return "active";
+    }
+}
 
-// ── JSON helpers ────────────────────────────────────────────────────────────
+JobController::JobController(JobService& service) : service_(service) {}
 
 std::string JobController::job_to_json(const Job& job) {
     int64_t nrt = static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(
-            job.next_run_time.time_since_epoch()).count());
+            job.nextRunTime.time_since_epoch()).count());
 
     return obj({
         kv      ("id",               job.id),
         kv      ("name",             job.name),
-        kv      ("status",           to_string(job.status)),
+        kv      ("status",           status_str(job.status)),
         kv      ("schedule_type",    job.schedule_type),
         kv      ("schedule_expr",    job.schedule_expr),
-        kv      ("execution_target", job.execution_target),
-        kv_int  ("max_retries",      job.retry_policy.max_retries),
-        kv_int  ("retry_delay_s",    static_cast<int>(
-                                         job.retry_policy.retry_delay.count())),
-        kv_int  ("retry_count",      job.retry_count),
+        kv      ("execution_target", job.executionTarget),
+        kv_int  ("max_retries",      job.retryPolicy.maxRetries),
+        kv_int  ("retry_delay_s",    job.retryPolicy.backoffSeconds),
+        kv_int  ("retry_count",      job.retryCount),
         kv_int64("next_run_time",    nrt)
     });
 }
@@ -40,20 +50,18 @@ std::string JobController::jobs_to_json(const std::vector<Job>& jobs) {
     return out + "]";
 }
 
-// ── Route registration ──────────────────────────────────────────────────────
-
 void JobController::register_routes(httplib::Server& svr) {
-    // POST /jobs – create a new job
+    // POST /jobs
     svr.Post("/jobs", [this](const httplib::Request& req,
                               httplib::Response& res) {
         SimpleParser p(req.body);
 
         CreateJobRequest cr;
-        cr.name             = p.get_str("name");
-        cr.schedule_type    = p.get_str("schedule_type");
-        cr.schedule_expr    = p.get_str("schedule_expr");
-        cr.execution_target = p.get_str("execution_target");
-        cr.max_retries      = p.get_int("max_retries",       0);
+        cr.name                = p.get_str("name");
+        cr.schedule_type       = p.get_str("schedule_type");
+        cr.schedule_expr       = p.get_str("schedule_expr");
+        cr.execution_target    = p.get_str("execution_target");
+        cr.max_retries         = p.get_int("max_retries", 0);
         cr.retry_delay_seconds = p.get_int("retry_delay_seconds", 5);
 
         auto result = service_.create_job(cr);
@@ -66,7 +74,7 @@ void JobController::register_routes(httplib::Server& svr) {
         res.set_content(job_to_json(*result.job), "application/json");
     });
 
-    // GET /jobs – list all jobs
+    // GET /jobs
     svr.Get("/jobs", [this](const httplib::Request&,
                              httplib::Response& res) {
         auto jobs = service_.list_jobs();
@@ -74,7 +82,7 @@ void JobController::register_routes(httplib::Server& svr) {
         res.set_content(jobs_to_json(jobs), "application/json");
     });
 
-    // GET /jobs/:id – get one job
+    // GET /jobs/:id
     svr.Get(R"(/jobs/([a-fA-F0-9]+))",
             [this](const httplib::Request& req, httplib::Response& res) {
         std::string id = req.matches[1];
@@ -126,7 +134,7 @@ void JobController::register_routes(httplib::Server& svr) {
             res.set_content(error_obj(result.error), "application/json");
             return;
         }
-        res.status = 204; // No Content
+        res.status = 204;
     });
 }
 
