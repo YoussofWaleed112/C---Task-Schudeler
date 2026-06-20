@@ -1,6 +1,7 @@
 #pragma once
-#include "job_scheduler/models/Job.hpp"
-#include "job_scheduler/repository/IJobRepository.hpp"
+#include "job_scheduler/models/job.hpp"
+#include "job_scheduler/repository/IJobReader.hpp"
+#include "job_scheduler/repository/IJobWriter.hpp"
 #include <queue>
 #include <vector>
 #include <functional>
@@ -12,7 +13,6 @@
 
 namespace job_scheduler {
 
-
 class Scheduler {
 public:
     using DueCallback = std::function<void(Job)>;
@@ -20,7 +20,7 @@ public:
     explicit Scheduler(IJobReader& reader, IJobWriter& writer);
     ~Scheduler();
 
-    /** Rebuild heap from all active/paused jobs in the database. */
+    /** Rebuild heap from all active jobs in the database. */
     void load_from_repository();
 
     /** Add a newly created job to the heap. */
@@ -35,6 +35,9 @@ public:
     /** Resume – job is re-inserted with its stored next_run_time. */
     void resume(const Job& job);
 
+    /** Re-insert a job after execution (recurring jobs). */
+    void reschedule(const Job& job);
+
     /** Register the callback fired when a job is due. */
     void set_due_callback(DueCallback cb);
 
@@ -48,8 +51,6 @@ private:
     struct HeapEntry {
         std::chrono::system_clock::time_point next_run;
         std::string job_id;
-
-        // Min-heap: smallest time_point first
         bool operator>(const HeapEntry& o) const { return next_run > o.next_run; }
     };
 
