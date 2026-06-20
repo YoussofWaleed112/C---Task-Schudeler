@@ -10,8 +10,10 @@ struct Job {
     std::string              name;
     JobStatus                status;
     std::shared_ptr<ISchedule> schedule;
+    std::string              schedule_type;   // "one_time" | "interval" | "cron"
+    std::string              schedule_expr;   // serialized schedule data
     RetryPolicy              retryPolicy;
-    std::string              executionTarget; // command or function name to run
+    std::string              executionTarget;
     TimePoint                nextRunTime;
     int                      retryCount = 0;
 };
