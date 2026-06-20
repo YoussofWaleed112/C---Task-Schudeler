@@ -47,4 +47,4 @@ private:
     sqlite3_stmt* _stmt = nullptr;
 };
 
-} 
+}  
