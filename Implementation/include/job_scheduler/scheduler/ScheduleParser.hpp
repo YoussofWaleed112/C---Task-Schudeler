@@ -6,10 +6,8 @@
 #include <string>
 #include <memory>
 #include <stdexcept>
-#include <sstream>
 
 namespace job_scheduler {
-
 
 class ScheduleParser {
 public:
@@ -41,8 +39,7 @@ private:
             throw std::invalid_argument(
                 "one_time schedule_expr must be a positive Unix timestamp. Got: " + expr);
         }
-        auto tp = std::chrono::system_clock::from_time_t(
-            static_cast<time_t>(ts));
+        auto tp = std::chrono::system_clock::from_time_t(static_cast<time_t>(ts));
         return std::make_shared<OneTimeSchedule>(tp);
     }
 
@@ -58,12 +55,11 @@ private:
             throw std::invalid_argument(
                 "interval schedule_expr must be > 0 seconds. Got: " + expr);
         }
-        return std::make_shared<IntervalSchedule>(
-            std::chrono::seconds(seconds));
+        // IntervalSchedule takes int seconds
+        return std::make_shared<IntervalSchedule>(static_cast<int>(seconds));
     }
 
     static std::shared_ptr<ISchedule> parse_cron(const std::string& expr) {
-        // CronSchedule constructor throws on invalid expression
         return std::make_shared<CronSchedule>(expr);
     }
 };
